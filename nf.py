@@ -14,7 +14,6 @@ listen = False
 bind = False
 upload = False
 port_cleaing = False
-one_shot = False
 message = False
 quiet = False
 stream = False
@@ -55,7 +54,6 @@ def usage():
         -q --quiet                 - Run commands quietly i.e running a bind shell so the server does not display information
         -r --reverse               - (WIP DO NOT USE YET) use the script as a simple reverse shell
         -s --stream                - Use this for a pure pipeline similar to NetCat. Needed when using the FIFO pipeline command
-        -o --one-shot              - (WIP DO NOTE USE YET) connect once and send stdin to the listener
         -t --target_host           - Select a specific target host
         -u --upload=destination    - Upload a file upon connection
 ------------------------------------------------------------------------------------------
@@ -518,7 +516,6 @@ def main():
     global port_cleaing
     global reverse
     global stream
-    global one_shot
     global listen_host
     global message
     global mode
@@ -530,7 +527,7 @@ def main():
     try:
         opts, args = getopt.getopt(
             sys.argv[1:],
-            'hle:t:p:bu:FrsL:m',
+            'hle:t:p:b:FrsL:m',
             [
                 'help',
                 'listen',
@@ -542,7 +539,6 @@ def main():
                 'force-freeing',
                 'reverse',
                 'stream',
-                'one-shot',
                 'listen-host=',
                 'message',
             ],
@@ -576,8 +572,6 @@ def main():
         elif o in ('-s', '--stream'):
             stream = True
             mode = 'stream'
-        elif o in ('-o', '--one-shot'):
-            one_shot = True
         elif o in ('-t', '--target'):
             target = a
         elif o in ('-u', '--upload'):
