@@ -8,6 +8,7 @@ There is not a required.txt file yet because I am still learning how all this wo
 
 Here are the required packeges needed for this scirpt to work properly:
 import os
+import json
 import sys
 import pty
 import socket
