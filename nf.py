@@ -1,4 +1,5 @@
 import os
+import json
 import sys
 # import pty
 import socket
@@ -23,7 +24,8 @@ upload_destination = ''
 port = 0
 listen_host = ''
 mode = ''
-username = ''
+client_name = ''
+server_name = ''
 
 # A Notice to inform users to use this tool responsibly
 def notice():
@@ -152,9 +154,9 @@ def server_end(client_socket):
     global execute
     global bind
     global message
-    global username
     global stream
     global mode
+    global server_name
 
     client_socket.sendall((f'{mode} \n').encode())
 
@@ -197,30 +199,22 @@ def server_end(client_socket):
                 break
 
             shell.write(data.decode('utf-8', errors='ignore'))
-            # client_socket.sendall(b'<BHP:#> ')
-            # cmd_buffer = b''
-
-            # while b'\n' not in cmd_buffer:
-            #     chunk = client_socket.recv(1024)
-
-            #     if not chunk:
-            #         print('\n [*] Client disconnected...')
-            #         client_socket.close()
-            #         return
-                
-            #     cmd_buffer += chunk
-
-            # command_text = cmd_buffer.decode('utf-8', errors='ignore').rstrip('\r\n')
-
-            # if command_text.strip().lower() in ('quit', 'exit'):
-            #     client_socket.send(b' [*] Disconnecting...')
-            #     client_socket.close()
-            #     return
-
-            # response = shell.execute(command_text)
-            # client_socket.sendall(response.encode('utf-8', errors='ignore'))
             
     elif message:
+        server_name_choice = input('\n [*] Do you want to set a username  (y or n): ')
+
+        while server_name_choice.lower() not in ('y', 'n'):
+            server_name_choice = input('\n [*] Invalid input please type either y or n: ')
+
+        if server_name_choice.lower() == 'y':
+            server_name = input('\n [*] What is your temp username: ')
+        else:
+            server_name = 'Server'
+
+        client_socket.sendall(json.dumps({'name': server_name}).encode('utf-8') + b'\n')
+        client_info = json.loads(client_socket.recv(1024).decode())
+        client_uname = client_info['name']
+
         def recv_msg():
             while True:
                 data = client_socket.recv(1024)
@@ -229,17 +223,12 @@ def server_end(client_socket):
                     break
 
                 text = data.decode().rstrip('\r\n')
-
-                # if text.strip().lower() in ('quit', 'exit', 'shutdown'):
-                #     print(' [*] Disconnecting...')
-                #     client_socket.close()
-                #     continue
-                sys.stdout.write(f'\nClient: {text}\n<MSG:#>')
+                sys.stdout.write(f'\n{client_uname}: {text}\n<{server_name}:#>')
 
         def send_msg():
             print(' [*] To disconnect type either: quit/exit/shutdown')
             while True:
-                msg = input('<MSG:#> ')
+                msg = input(f'<{server_name}:#> ')
 
                 client_socket.sendall((f'{msg} \n').encode())
 
@@ -340,13 +329,37 @@ def server_loop():
     sys.exit(0)
 
 def client_end(buffer):
-    global username
     global stream
+    global client_name
 
     client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     stop_event = threading.Event()
 
-    def receive_loop():
+    client.connect((target, port))
+    server_mode = client.recv(1024).decode().strip()
+    print(f' [*] Server mode: {server_mode}')
+
+    if server_mode == 'message':
+        run_message = True
+        run_bind = False
+        run_stream = False
+
+    elif server_mode == 'bind':
+        run_bind = True
+        run_message = False
+        run_stream = False
+
+    elif server_mode == 'stream':
+        run_stream = True
+        run_message = False
+        run_bind = False
+
+    else:
+        run_message = False
+        run_bind = False
+        run_stream = False
+
+    def receive_loop():           
         while not stop_event.is_set():
             try:
                 data = client.recv(4096)
@@ -366,7 +379,7 @@ def client_end(buffer):
 
             if run_message:
                 text = data.decode().rstrip('\r\n')
-                sys.stdout.write(f'\nServer: {text}\n<MSG:#>')
+                sys.stdout.write(f'\n{server_uname}: {text}\n<{client_name}:#>')
 
             elif run_bind:
                 sys.stdout.write(data.decode(errors='ignore'))
@@ -374,7 +387,7 @@ def client_end(buffer):
 
     def send_msg():
         while True:
-            msg = input('<MSG:#> ')
+            msg = input(f'<{client_name}:#> ')
             client.sendall((msg + '\n').encode())
 
             if msg.strip().lower() in ('quit', 'exit', 'shutdown'):
@@ -383,33 +396,23 @@ def client_end(buffer):
                 return
 
     try:
-        client.connect((target, port))
-        server_mode = client.recv(1024).decode().strip()
-        print(f' [*] Server mode: {server_mode}')
-
-        if server_mode == 'message':
-            run_message = True
-            run_bind = False
-            run_stream = False
-
-        elif server_mode == 'bind':
-            run_bind = True
-            run_message = False
-            run_stream = False
-
-        elif server_mode == 'stream':
-            run_stream = True
-            run_message = False
-            run_bind = False
-
-        else:
-            run_message = False
-            run_bind = False
-            run_stream = False
-
         print(f' [*] To disconnect type either: quit/exit/shutdown')
 
         if run_message:
+            client_name_choice = input('\n [*] Do you want to set a username (y or n): ')
+            while client_name_choice.lower() not in ('y', 'n'):
+                client_name_choice = input('\n [*] Invalide input please type either y or n: ')
+    
+            if client_name_choice.lower() == 'y':
+                client_name = input('\n [*] Set your username: ')
+            else:
+                client_name = 'Client'
+
+            handshake = json.loads(client.recv(1024).decode())
+
+            server_uname = handshake['name']
+            client.sendall(json.dumps({'name': client_name}).encode('utf-8') + b'\n')
+
             client.settimeout(0.2)
 
             print(f' [*] Connect to Server on  {target}:{port}')
@@ -433,13 +436,7 @@ def client_end(buffer):
                         if not data:
                             break
 
-                        print(
-                            data.decode(
-                                errors="ignore"
-                            ),
-                            end=""
-                        )
-
+                        print(data.decode(errors="ignore"),end="")
                     except OSError:
                         break
 
@@ -524,8 +521,9 @@ def main():
     global one_shot
     global listen_host
     global message
-    global username
     global mode
+    global client_name
+    global server_name
 
     if not len(sys.argv[1:]):
         usage()
