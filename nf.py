@@ -527,7 +527,7 @@ def main():
     try:
         opts, args = getopt.getopt(
             sys.argv[1:],
-            'hle:t:p:b:FrsL:m',
+            'hle:t:p:bFrsL:m',
             [
                 'help',
                 'listen',
