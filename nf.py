@@ -1,7 +1,8 @@
 import os
+import shutil
 import json
 import sys
-# import pty
+import pty
 import socket
 import getopt
 import threading
@@ -72,17 +73,87 @@ General Notes:
             If errors show up from exsiting from a connection do not be alarmed that will happen currently working on making the script not do that.''')
     sys.exit(0)
 
-# class UnixShell:
+class Linuxshell:
+    def __init__(self):
+        self.shell = None
+        self.running = False
+
+        shell = os.environ.get('SHELL')
+
+        if not shell or not os.path.exists(shell):
+            shell = None
+
+        shell = (
+            os.environ.get('SHELL')
+            or shutil.which('bash')
+            or shutil.which('sh')
+            or '/bin/sh'
+        )
+
+        try:
+            self.shell = subprocess.Popen(
+                [
+                    shell
+                ],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1
+            )
+        except FileNotFoundError:
+            raise RuntimeError(f' [*] Shell not found: {shell}...')
+
+        self.running = True
+
+    def read_loop(self, client_socket):
+        while self.running:
+            output = self.shell.stdout.read(1)
+
+            if output:
+                client_socket.sendall(output.encode('utf-8', errors='ignore'))
+
+    def write(self, data):
+        if self.running:
+            self.shell.stdin.write(data)
+            self.shell.stdin.flush()
+
+    def close(self):
+        self.running = False
+
+        if self.shell:
+            self.shell.terminate()
+
+# class MacShell:
 #     def __init__(self):
-#         print('WIP')
+#         shell = os.environ.get('SHELL')
+#         if not shell or not os.path.exists(shell):
+#             shell = (
+#                 shutil.which('zsh')
+#                 or shutil.which('bash')
+#                 or shutil.which('sh')
+#                 or '/bin/sh'
+#             )
 
 class ShellSession:
     def __init__(self):
         self.shell = None
         self.running = False
+
+        shell = os.environ.get('COMSPEC')
+
+        if not shell or not os.path.exists(shell):
+            shell = (
+                shutil.which('pwsh.exe')
+                or shutil.which('powershell.exe')
+                or shutil.which('cmd.exe')
+                or shutil.which('cmd')
+                or r'C:\Windows\System32\cmd.exe'
+            )
+
         self.shell = subprocess.Popen(
             [
-                'cmd.exe'
+                shell
             ],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
@@ -184,9 +255,10 @@ def server_end(client_socket):
     #     client_socket.sendall(output)
 
     if bind:
-        shell = ShellSession()
-        # else:
-        #     shell = UnixShell()
+        if sys.platform.startswith('win'):
+            shell = ShellSession()
+        elif sys.platform.startswith('linux') or sys.platform.startswith('darwin'):
+            shell = Linuxshell()
 
         threading.Thread(target=shell.read_loop, args=(client_socket,), daemon=True).start()
 
