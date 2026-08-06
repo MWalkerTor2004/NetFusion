@@ -178,7 +178,8 @@ Available commands:
 
                 arguments.append('-l')
 
-                arguments.extend(command)
+                if len(command) > 0:
+                    arguments.extend(['-p', command[0]])
                                  
                 parse_arguments(config, arguments)
 
