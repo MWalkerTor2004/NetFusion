@@ -1,3 +1,4 @@
+from logging import config
 import os
 import shutil
 import json
@@ -7,25 +8,230 @@ import socket
 import getopt
 import threading
 import subprocess
+import platform
 import select
+import time
+import readline
 import psutil as p  # Used to look for any open/running ports incase of a improper shutdown
 
-# define global variables
-listen = False
-bind = False
-upload = False
-port_cleaing = False
-message = False
-quiet = False
-stream = False
-execute = ''
-target = ''
-upload_destination = ''
-port = 0
-listen_host = ''
-mode = ''
-client_name = ''
-server_name = ''
+prompt = 'netfusion > '
+
+# define variables in a class to avoid using global variables The only global needed is prompt which is used in the nf_input function to display the prompt to the user
+class NetFusionConfig():
+    def __init__(self):
+        self.listen = False
+        self.bind = False
+        self.upload = False
+        self.port_clearing = False
+        self.message = False
+        self.quiet = False
+        self.stream = False
+        self.prompt = 'netfusion >'
+        self.execute = ''
+        self.target = ''
+        self.upload_destination = ''
+        self.port = 0
+        self.listen_host = ''
+        self.mode = ''
+        self.client_name = ''
+        self.server_name = ''
+        self.run_message = False
+        self.run_bind = False
+        self.run_stream = False
+
+def start_session(config):
+    if config.listen and not config.mode:
+        print(' [*] No mode specified.')
+        return
+
+    if config.listen:
+        server_loop(config)
+
+    elif config.target and config.port:
+        client_end(config, '')
+
+    else:
+        print(' [*] No target or port specified.')
+
+def nf_input(PROMPT=prompt):
+    return input(PROMPT)
+
+def startup():
+    steps = [
+        'Loading configuration...',
+        'Initializing networking...',
+        'Loading shell handlers...',
+        'Preparing transport layer...',
+        'Starting Fusion Core...'
+    ]
+
+    for step in steps:
+        print(f' [+] {step}')
+        time.sleep(0.15)
+
+    print()
+
+    banner()
+
+def slow_print(text, delay=0.03):
+    for line in text.splitlines():
+        print(line)
+        time.sleep(delay)
+
+def banner():
+    hostname = socket.gethostname()
+
+    cpu = p.cpu_count()
+    memory = round(p.virtual_memory().total / (1024**3), 1)  # Convert bytes to GB and round to 1 decimal place
+
+    banner_text = rf'''
+                             ███╗   ██╗███████╗████████╗
+                             ████╗  ██║██╔════╝╚══██╔══╝
+                             ██╔██╗ ██║█████╗     ██║
+                             ██║╚██╗██║██╔══╝     ██║
+                             ██║ ╚████║███████╗   ██║
+                             ╚═╝  ╚═══╝╚══════╝   ╚═╝
+
+                               ███████╗██╗   ██╗███████╗██╗ ██████╗ ███╗   ██╗
+                               ██╔════╝██║   ██║██╔════╝██║██╔═══██╗████╗  ██║
+                               █████╗  ██║   ██║███████╗██║██║   ██║██╔██╗ ██║
+                               ██╔══╝  ██║   ██║╚════██║██║██║   ██║██║╚██╗██║
+                               ██║     ╚██████╔╝███████║██║╚██████╔╝██║ ╚████║
+                               ╚═╝      ╚═════╝ ╚══════╝╚═╝ ╚═════╝ ╚═╝  ╚═══╝
+
+   Version       2.0.0
+   Python        {platform.python_version()}
+   Platform      {platform.system()} {platform.release()}
+   Hostname      {hostname}
+   PID           {os.getpid()}
+   Threads       {threading.active_count()}
+   Runtime       {platform.python_implementation()}
+   CPU Cores     {cpu}
+   Memory        {memory} GB
+   Status        Ready
+
+   ───────────────────────────────────────────────────────────
+
+   ✔ Connection Handler
+   ✔ Bind Shell
+   ✔ Interactive Messaging
+   ✔ TCP Stream Pipeline
+   ✔ Cross-Platform Shell
+
+   ───────────────────────────────────────────────────────────
+'''
+    slow_print(banner_text, delay=0.03)
+
+def nf_console(config):
+    while True:
+        try:
+            command = nf_input().split()
+
+            if not command:
+                continue
+
+            elif command[0].lower() == 'help':
+                print('''
+Available commands:
+  help                Show this help message
+  clear               Clear the console screen
+  info                Show information about the current session
+  connect <host> <port>   Connect to a target host and port
+  quit/exit/shutdown  Exit the program
+  message             Start a messaging session with a target host and port
+  bind                Start a bind shell on a target host and port
+  stream              Start a TCP stream pipeline with a target host and port
+  listen <port>       Start a listener on a target host and port
+    ''')
+            elif command[0].lower()in ('quit', 'exit', 'shutdown'):
+                print(' [*] Disconnecting NetFusion...')
+                sys.exit(0)
+
+            elif command[0].lower() == 'clear':
+                os.system('cls' if os.name == 'nt' else 'clear')
+                banner()
+
+            elif command[0].lower() == 'info':
+                banner()
+
+            elif command[0].lower() == 'connect':
+                if len(command) < 3:
+                    print(' [!] Usage: connect <host> <port>')
+                    continue
+
+                arguments = [
+                    '-t', command[1],
+                    '-p', command[2]
+                ]
+
+                parse_arguments(config, arguments)
+
+                client_end(config, '')
+
+                print(f' [*] Connecting to {config.target}:{config.port}...')
+
+            elif command[0].lower() == 'listen':
+
+                command.pop(0)  # Remove the 'listen' command from the list
+
+                arguments = []
+
+                arguments.append('-l')
+
+                arguments.extend(command)
+                                 
+                parse_arguments(config, arguments)
+
+                server_loop(config)
+
+            elif command[0].lower() in ('message', 'bind' , 'stream'):
+
+                arguments = [] 
+
+                mode = command[0].lower()
+
+                if mode == 'message':
+                    arguments.append('-m')
+
+                elif mode == 'bind':
+                    arguments.append('-b')
+
+                elif mode == 'stream':
+                    arguments.append('-s')
+
+                arguments.append('-l')
+
+                if len(command) > 1:
+                    arguments.extend(['-p', command[1]])
+
+                parse_arguments(config, arguments)
+
+                server_loop(config)
+
+            elif command[0].lower() == 'clean':
+                if len(command) < 2:
+                    print(' [!] Usage: clean <port>')
+                    continue
+
+                try:
+                    port = int(command[1])
+                except ValueError:
+                    print(' [!] Invalid port number. Please provide a valid integer.')
+                    continue
+
+                cleaned = is_port_in_use(config, port)
+
+                if cleaned:
+                    print(f' [*] Port {port} has been cleaned.')
+                else:
+                    print(f' [*] Port {port} is not in use or could not be cleaned.')
+
+            else:
+                print(f' [!] Unknown command: {command}. Type "help" for a list of available commands.')
+
+        except KeyboardInterrupt:
+            print('\n [*] KeyboardInterrupt received. Exiting...')
+            sys.exit(0)
 
 # A Notice to inform users to use this tool responsibly
 def notice():
@@ -182,17 +388,15 @@ class ShellSession:
         if self.shell:
             self.shell.terminate()
 
-def is_port_in_use(port):
-    global port_cleaing
-
+def is_port_in_use(config, port):
     try:
-        if port_cleaing:
+        if config.port_clearing:
             for conn in p.net_connections():
                 if conn.laddr.port == port:
-                    user_input = input(f' [*] Port {port} is in use by PID {conn.pid}.\n [*] Do you want to terminate the process using this port? (y/n): ')
+                    user_input = nf_input(f' [*] Port {port} is in use by PID {conn.pid}.\n [*] Do you want to terminate the process using this port? (y/n): ')
 
                     while user_input.lower() not in ['y', 'n']:
-                        user_input = input('\n [*] Invalid input. Please enter either y or n: ')
+                        user_input = nf_input('\n [*] Invalid input. Please enter either y or n: ')
 
                     if user_input.lower() == 'y':
                         try:
@@ -216,20 +420,12 @@ def is_port_in_use(port):
         print(f' [*] Error checking port usage: {e}')
         return True
     
-    port_cleaing = False  # Reset the port_cleaing flag after checking
+    config.port_clearing = False  # Reset the port_clearing flag after checking
 
-def server_end(client_socket):
-    global upload
-    global execute
-    global bind
-    global message
-    global stream
-    global mode
-    global server_name
+def server_end(client_socket, config):
+    client_socket.sendall((f'{config.mode} \n').encode())
 
-    client_socket.sendall((f'{mode} \n').encode())
-
-    if len(upload_destination):
+    if len(config.upload_destination):
         file_buffer = b''
 
         while True:
@@ -242,19 +438,19 @@ def server_end(client_socket):
                 file_buffer += data
 
         try:
-            file_descriptor = open(upload_destination, 'wb')
+            file_descriptor = open(config.upload_destination, 'wb')
             file_descriptor.write(file_buffer)
             file_descriptor.close()
-            client_socket.send(('Successfully saved file to %s\r\n' % upload_destination).encode())
+            client_socket.send(('Successfully saved file to %s\r\n' % config.upload_destination).encode())
         except:
-            client_socket.send(('Failed to save file to %s\r\n' % upload_destination).encode())
+            client_socket.send(('Failed to save file to %s\r\n' % config.upload_destination).encode())
 
     # if len(execute):
     #     output = ShellSession(execute)
 
     #     client_socket.sendall(output)
 
-    if bind:
+    if config.bind:
         if sys.platform.startswith('win'):
             shell = ShellSession()
         elif sys.platform.startswith('linux') or sys.platform.startswith('darwin'):
@@ -270,18 +466,18 @@ def server_end(client_socket):
 
             shell.write(data.decode('utf-8', errors='ignore'))
             
-    elif message:
+    elif config.message:
         server_name_choice = input('\n [*] Do you want to set a username  (y or n): ')
 
         while server_name_choice.lower() not in ('y', 'n'):
             server_name_choice = input('\n [*] Invalid input please type either y or n: ')
 
         if server_name_choice.lower() == 'y':
-            server_name = input('\n [*] What is your temp username: ')
+            config.server_name = input('\n [*] What is your temp username: ')
         else:
-            server_name = 'Server'
+            config.server_name = 'Server'
 
-        client_socket.sendall(json.dumps({'name': server_name}).encode('utf-8') + b'\n')
+        client_socket.sendall(json.dumps({'name': config.server_name}).encode('utf-8') + b'\n')
         client_info = json.loads(client_socket.recv(1024).decode())
         client_uname = client_info['name']
 
@@ -293,12 +489,12 @@ def server_end(client_socket):
                     break
 
                 text = data.decode().rstrip('\r\n')
-                sys.stdout.write(f'\n{client_uname}: {text}\n<{server_name}:#>')
+                sys.stdout.write(f'\n{client_uname}: {text}\n<{config.server_name}:#>')
 
         def send_msg():
             print(' [*] To disconnect type either: quit/exit/shutdown')
             while True:
-                msg = input(f'<{server_name}:#> ')
+                msg = input(f'<{config.server_name}:#> ')
 
                 client_socket.sendall((f'{msg} \n').encode())
 
@@ -318,7 +514,7 @@ def server_end(client_socket):
 
         client_socket.close()
 
-    elif stream:
+    elif config.stream:
         def send_stream():
             while True:
                 data = sys.stdin.buffer.read(4096)
@@ -339,31 +535,26 @@ def server_end(client_socket):
             sys.stdout.buffer.write(data)
             sys.stdout.buffer.flush()
 
-def server_loop():
-    global target
-    global port
-    global listen_host
-    global mode
-
-    bind_host = listen_host or target or '0.0.0.0'
+def server_loop(config):
+    bind_host = config.listen_host or config.target or '0.0.0.0'
 
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server.settimeout(1.0)
     
     try:
-        server.bind((bind_host, port))
+        server.bind((bind_host, config.port))
     except OSError as e:
         if getattr(e, 'errno', None) == 98:
-            print(f' [*] Port {port} is already in use.\n ')
+            print(f' [*] Port {config.port} is already in use.\n ')
 
-            if port_cleaing:
-                cleaned = is_port_in_use(port)
+            if config.port_clearing:
+                cleaned = is_port_in_use(config, config.port)
 
                 if cleaned:
                     try:
-                        server.bind((bind_host, port))
-                        print(f' [*] Redound successfull... Bound to {bind_host}:{port}...')
+                        server.bind((bind_host, config.port))
+                        print(f' [*] Redound successfull... Bound to {bind_host}:{config.port}...')
                     except OSError:
                         print(' [*] Port unavailable...')
                         return
@@ -373,7 +564,7 @@ def server_loop():
 
     server.listen(5)
     try:
-        print(f' [*] Listening on {bind_host}:{port}')
+        print(f' [*] Listening on {bind_host}:{config.port}')
 
         while True:
             try:
@@ -384,9 +575,9 @@ def server_loop():
                 raise
 
             print(f''' -----------------------------------------------------------------------------------------
- [*] Connection established from {addr[0]} On listener port: {port}
+ [*] Connection established from {addr[0]} On listener port: {config.port}
  [*] You can now interact with the client.\n [*] Client IP: {addr[0]} \n [*] Client Temporary Port: {addr[1]} ''')
-            client_thread = threading.Thread(target=server_end, args=(client_socket,))
+            client_thread = threading.Thread(target=server_end, args=(client_socket, config))
             client_thread.daemon = True
             client_thread.start()
     except KeyboardInterrupt:
@@ -398,36 +589,33 @@ def server_loop():
             pass
     sys.exit(0)
 
-def client_end(buffer):
-    global stream
-    global client_name
-
+def client_end(config, buffer):
     client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     stop_event = threading.Event()
 
-    client.connect((target, port))
+    client.connect((config.target, config.port))
     server_mode = client.recv(1024).decode().strip()
     print(f' [*] Server mode: {server_mode}')
 
     if server_mode == 'message':
-        run_message = True
-        run_bind = False
-        run_stream = False
+        config.run_message = True
+        config.run_bind = False
+        config.run_stream = False
 
     elif server_mode == 'bind':
-        run_bind = True
-        run_message = False
-        run_stream = False
+        config.run_bind = True
+        config.run_message = False
+        config.run_stream = False
 
     elif server_mode == 'stream':
-        run_stream = True
-        run_message = False
-        run_bind = False
+        config.run_stream = True
+        config.run_message = False
+        config.run_bind = False
 
     else:
-        run_message = False
-        run_bind = False
-        run_stream = False
+        config.run_message = False
+        config.run_bind = False
+        config.run_stream = False
 
     def receive_loop():           
         while not stop_event.is_set():
@@ -447,17 +635,17 @@ def client_end(buffer):
                 client.close()
                 break 
 
-            if run_message:
+            if config.run_message:
                 text = data.decode().rstrip('\r\n')
-                sys.stdout.write(f'\n{server_uname}: {text}\n<{client_name}:#>')
+                sys.stdout.write(f'\n{server_uname}: {text}\n<{config.client_name}:#>')
 
-            elif run_bind:
+            elif config.run_bind:
                 sys.stdout.write(data.decode(errors='ignore'))
                 sys.stdout.flush()
 
     def send_msg():
         while True:
-            msg = input(f'<{client_name}:#> ')
+            msg = input(f'<{config.client_name}:#> ')
             client.sendall((msg + '\n').encode())
 
             if msg.strip().lower() in ('quit', 'exit', 'shutdown'):
@@ -468,24 +656,24 @@ def client_end(buffer):
     try:
         print(f' [*] To disconnect type either: quit/exit/shutdown')
 
-        if run_message:
-            client_name_choice = input('\n [*] Do you want to set a username (y or n): ')
-            while client_name_choice.lower() not in ('y', 'n'):
-                client_name_choice = input('\n [*] Invalide input please type either y or n: ')
+        if config.run_message:
+            config.client_name_choice = input('\n [*] Do you want to set a username (y or n): ')
+            while config.client_name_choice.lower() not in ('y', 'n'):
+                config.client_name_choice = input('\n [*] Invalide input please type either y or n: ')
     
-            if client_name_choice.lower() == 'y':
-                client_name = input('\n [*] Set your username: ')
+            if config.client_name_choice.lower() == 'y':
+                config.client_name = input('\n [*] Set your username: ')
             else:
-                client_name = 'Client'
+                config.client_name = 'Client'
 
             handshake = json.loads(client.recv(1024).decode())
 
             server_uname = handshake['name']
-            client.sendall(json.dumps({'name': client_name}).encode('utf-8') + b'\n')
+            client.sendall(json.dumps({'name': config.client_name}).encode('utf-8') + b'\n')
 
             client.settimeout(0.2)
 
-            print(f' [*] Connect to Server on  {target}:{port}')
+            print(f' [*] Connect to Server on  {config.target}:{config.port}')
             send_thread = threading.Thread(target=send_msg)
             recv_thread = threading.Thread(target=receive_loop)
 
@@ -496,7 +684,7 @@ def client_end(buffer):
             recv_thread.join()
             return
 
-        elif run_bind:
+        elif config.run_bind:
 
             def shell_receive():
                 while True:
@@ -516,7 +704,7 @@ def client_end(buffer):
 
             while True:
                 try:
-                    command = input()
+                    command = nf_input()
 
                     if command.lower() in ('quit', 'exit', 'shutdown'):
                         break
@@ -529,7 +717,7 @@ def client_end(buffer):
                     print(f'\n [*] KeyboardInterrupt received. Exiting...')
                     continue
 
-        elif run_stream:
+        elif config.run_stream:
             def stream_receive():
                 while True:
                     try:
@@ -578,27 +766,19 @@ def client_end(buffer):
         client.close()
         sys.exit()
 
-def main():
-    global listen
-    global port
-    global execute
-    global bind
-    global upload_destination
-    global target
-    global port_cleaing
-    global reverse
-    global stream
-    global listen_host
-    global message
-    global mode
-    global client_name
-    global server_name
+def parse_arguments(config, arguments):
+    config.listen = False
+    config.bind = False
+    config.upload = False
+    config.port_clearing = False
+    config.message = False
+    config.quiet = False
+    config.stream = False
+    config.mode = ''
 
-    if not len(sys.argv[1:]):
-        usage()
     try:
         opts, args = getopt.getopt(
-            sys.argv[1:],
+            arguments,
             'hle:t:p:bFrsL:m',
             [
                 'help',
@@ -617,51 +797,57 @@ def main():
         )
     except getopt.GetoptError as err:
         print(str(err))
-        usage()
+        return False
+    
     for o, a in opts:
         if o in ('-h', '--help'):
             usage()
         elif o in ('-b', '--bind'):
-            bind = True
-            mode = 'bind'
+            config.bind = True
+            config.mode = 'bind'
         elif o in ('-e', '--execute'):
-            execute = a
+            config.execute = a
         elif o in ('-F', '--force-freeing'):
-            port_cleaing = True
+            config.port_clearing = True
         elif o in ('-l', '--listen'):
-            listen = True
+            config.listen = True
         elif o in ('-L', '--listen-host'):
-            listen_host = a
-            listen = True
+            config.listen_host = a
+            config.listen = True
         elif o in ('-m', '--message'):
-            message = True
-            mode = 'message'
+            config.message = True
+            config.mode = 'message'
+
+            if not config.target:
+                config.listen = True
         elif o in ('-r', '--reverse'):
-            reverse = True
-            mode = 'reverse'
+            config.reverse = True
+            config.mode = 'reverse'
         elif o in ('-p', '--port'):
-            port = int(a)
+            config.port = int(a)
         elif o in ('-s', '--stream'):
-            stream = True
-            mode = 'stream'
+            config.stream = True
+            config.mode = 'stream'
         elif o in ('-t', '--target'):
-            target = a
+            config.target = a
         elif o in ('-u', '--upload'):
-            upload_destination = a
-        else:
-            assert False, 'Unhandled Option'
+            config.upload_destination = a
 
-    if not listen and len(target) and port > 0:
-        if sys.stdin.isatty():
-            buffer = ''
+    return True
 
-        else:
-            buffer = sys.stdin.read()
+def main():
+    startup()
 
-        client_end(buffer)
+    config = NetFusionConfig()
 
-    if listen:
-        server_loop()
+    if len(sys.argv) == 1:
+        nf_console(config)
+        return
+
+    parse_arguments(config, sys.argv[1:])
+
+    start_session(config)
+
 
 if __name__ == '__main__':
     main()
