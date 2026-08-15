@@ -17,6 +17,12 @@ if os.name != 'nt':
     import termios
     import tty
 
+# Setting protocol handlers for NetFusion
+nfp = b'NF/1'
+nfch = b'NF/1 CLIENT\n'
+max_handshake_size = 64
+handshake_timeout = 2.0
+
 # define variables in a class to avoid using global variables The only global needed is prompt which is used in the nf_input function to display the prompt to the user
 class NetFusionConfig():
     def __init__(self):
@@ -41,6 +47,8 @@ class NetFusionConfig():
         self.mode = ''
         self.client_name = ''
         self.server_name = ''
+        self.protocol = ''
+        self.protocol_timeout = handshake_timeout
         self.run_message = False
         self.run_bind = False
         self.run_stream = False
@@ -51,7 +59,7 @@ def start_session(config):
         return
 
     if config.listen:
-        server_loop(config)
+        server_loop(config, config.listener_stop)
 
     elif config.target and config.port:
         client_end(config, '')
@@ -336,7 +344,7 @@ def usage():
         -t --target_host           - Select a specific target host
         -u --upload=destination    - Upload a file upon connection
 ------------------------------------------------------------------------------------------
-General usage Examples:
+Use outside of the Tool examples:
           nf.py -h
           nf.py -F -p 5555
           nf.py -p 5555 -l -L 0.0.0.0
@@ -604,8 +612,102 @@ def is_port_in_use(config, port):
     
     config.port_clearing = False  # Reset the port_clearing flag after checking
 
+# Send NetFusion protocol ID and negotiated mode 
+def send_handshake(client_socket, mode):
+    if mode not in ('message', 'bind', 'stream'):
+        raise ValueError(f'Invalid NetFusion mode: {mode}')
+    
+    handshake = f'NF/1 {mode}\n'.encode('ascii')
+
+    client_socket.sendall(handshake)
+
+# Receive/ validate a NetFusion server handshake
+def receive_handshake(client_socket):
+    buffer = b''
+    try:
+        while len(buffer) < max_handshake_size:
+            data = client_socket.recv(1)
+
+            if not data:
+                print(' [!] Server closed the connection during handshake.')
+                return None
+
+            buffer += data
+
+            if data == b'\n':
+                break
+
+    except ConnectionResetError:
+        print(' [!] Connection was reset by the server during handshake.')
+        return None
+
+    except BrokenPipeError:
+        print(' [!] Broken pipe during handshake.')
+        return None
+
+    except OSError as e:
+        print(f' [!] Socket error during handshake: {e}')
+        return None
+
+    try:
+        line = buffer.decode('ascii').strip()
+    except UnicodeDecodeError:
+        print(' [!] Invalid characters received during handshake.')
+        return None
+
+    print(f'Raw handshaek recevied: {line!r}')
+    parts = line.split()
+
+    if len(parts) != 2:
+        print(f' [!] Invalid NetFusion handshake: {line!r}')
+        return None
+
+    protocol, mode = parts
+
+    if protocol != 'NF/1':
+        print(f' [!] Unsupported protocol: {protocol}')
+        return None
+
+    if mode not in ('message', 'bind', 'stream'):
+        print(f' [!] Unsupported NetFusion mode: {mode}')
+        return None
+
+    return mode
+
+#Detect whether a connection is NetFusion or raw TCP
+def detect_protocol(client_socket, timeout=2.0):
+    original_timeout = client_socket.gettimeout()
+
+    buffer = bytearray()
+
+    try:
+        client_socket.settimeout(timeout)
+
+        while len(buffer) < max_handshake_size:
+            data = client_socket.recv(1)
+
+            if not data:
+                break
+
+            buffer.extend(data)
+
+            if not nfch.startswith(bytes(buffer)):
+                return 'raw', bytes(buffer)
+
+            if bytes(buffer) == nfch:
+                return 'netfusion', b''
+            
+        return 'raw', bytes(buffer)
+    except socket.timeout:
+        return 'raw', bytes(buffer)
+    except (ConnectionError, BrokenPipeError, OSError):
+        return 'raw', bytes(buffer)
+    finally:
+        client_socket.settimeout(original_timeout)
+    
+
 def server_end(client_socket, config, mode):
-    client_socket.sendall((f'{mode} \n').encode())
+    send_handshake(client_socket, mode)
 
     if mode == 'message':
         config.terminal_busy.set()
@@ -717,25 +819,100 @@ def server_end(client_socket, config, mode):
             client_socket.close()
 
     elif mode == 'stream':
-        def send_stream():
-            while True:
+        def stream_receive():
+            try:
+                while True:
+                    data = client_socket.recv(4096)
+
+                    if not data:
+                        break
+
+                    sys.stdout.buffer.write(data)
+                    sys.stdout.buffer.flush()
+            except (ConnectionResetError, BrokenPipeError, OSError):
+                pass
+
+        def stream_send():
+            try:
+                while True:
+                    data = sys.stdin.buffer.read(4096)
+
+                    if not data:
+                        break
+
+                    client_socket.sendall(data)
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                pass
+
+        receive_threat = threading.Thread(target=stream_receive, daemon=True)
+        send_thread = threading.Thread(target=stream_send, daemon=True)
+
+        receive_threat.start()
+        send_thread.start()
+
+        client_socket.close()
+
+#Handle a raw TCP connection
+def raw_stream(client_socket, initial_data=b''):
+    stop_event = threading.Event()
+
+    def receive_loop():
+        try:
+            if initial_data:
+                sys.stdout.buffer.write(initial_data)
+                sys.stdout.buffer.flush()
+
+            while not stop_event.is_set():
+                data = client_socket.recv(4096)
+
+                if not data:
+                    break
+
+                sys.stdout.buffer.write(data)
+                sys.stdout.buffer.flush()
+
+        except (ConnectionError, BrokenPipeError, OSError):
+            pass
+        finally:
+            stop_event.set()
+
+    def send_loop():
+        try:
+            while not stop_event.is_set():
                 data = sys.stdin.buffer.read(4096)
 
                 if not data:
                     break
 
                 client_socket.sendall(data)
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
+        finally:
+            stop_event.set()
 
-        threading.Thread(target=send_stream, daemon=True).start()
+    receive_thread = threading.Thread(target=receive_loop, daemon=True)
+    send_thread = threading.Thread(target=send_loop, daemon=True)
 
-        while True:
-            data = client_socket.recv(1024)
+    receive_thread.start()
+    send_thread.start()
 
-            if not data:
-                break
+    try:
+        while not stop_event.is_set():
+            time.sleep(0.05)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        stop_event.set()
 
-            sys.stdout.buffer.write(data)
-            sys.stdout.buffer.flush()
+        try:
+            client_socket.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+
+        try:
+            client_socket.close()
+        except OSError:
+            pass
 
 def server_loop(config, stop_event):
     if config.port <= 0:
@@ -788,8 +965,24 @@ def server_loop(config, stop_event):
  [*] You can now interact with the client.\n [*] Client IP: {addr[0]} \n [*] Client Temporary Port: {addr[1]} 
  [*] To continue in message mode click enter...''', flush=True)
 
-            client_thread = threading.Thread(target=server_end, args=(client_socket, config, mode), daemon=True)
-            client_thread.start()
+            protocol, initial_data = detect_protocol(client_socket, timeout=config.protocol_timeout)
+
+            config.protocol = protocol
+            print(f' [*] Detected protocol: {protocol}')
+
+            if protocol == 'netfusion':
+                print(' [*] NetFusion client detected...')
+
+                client_thread = threading.Thread(target=server_end, args=(client_socket, config, config.mode), daemon=True)
+                client_thread.start()
+            elif protocol == 'raw':
+                print(' [*] Raw TCP connection detected...')
+
+                client_thread = threading.Thread(target=raw_stream, args=(client_socket, initial_data), daemon=True)
+                client_thread.start()
+            else:
+                print(' [*] Non-NetFusion connection detected...')
+                client_socket.close()
 
     except KeyboardInterrupt:
         print(f'\n [*] KeyboardInterrupt received. Exiting...')
@@ -808,7 +1001,15 @@ def client_end(config, buffer):
     stop_event = threading.Event()
 
     client.connect((config.target, config.port))
-    server_mode = client.recv(1024).decode().strip()
+    client.sendall(nfch)
+    server_mode = receive_handshake(client)
+    print(f'Parsed  server mode: {server_mode!r}')
+
+    if server_mode is None:
+        print(f' [!] Invalid NetFusion server handshake')
+        client.close()
+        return
+    
     print(f' [*] Server mode: {server_mode}')
 
     if server_mode == 'message':
@@ -873,136 +1074,140 @@ def client_end(config, buffer):
                 client.close()
                 return
 
-    try:
-        print(f' [*] To disconnect type either: quit/exit/shutdown')
+    print(f' [*] To disconnect type either: quit/exit/shutdown')
 
-        if config.run_message:
-            config.client_name_choice = input('\n [*] Do you want to set a username (y or n): ')
-            while config.client_name_choice.lower() not in ('y', 'n'):
-                config.client_name_choice = input('\n [*] Invalide input please type either y or n: ')
-    
-            if config.client_name_choice.lower() == 'y':
-                config.client_name = input('\n [*] Set your username: ')
-            else:
-                config.client_name = 'Client'
+    if config.run_message:
+        config.client_name_choice = input('\n [*] Do you want to set a username (y or n): ')
+        while config.client_name_choice.lower() not in ('y', 'n'):
+            config.client_name_choice = input('\n [*] Invalide input please type either y or n: ')
 
-            handshake = json.loads(client.recv(1024).decode())
+        if config.client_name_choice.lower() == 'y':
+            config.client_name = input('\n [*] Set your username: ')
+        else:
+            config.client_name = 'Client'
 
-            server_uname = handshake['name']
-            client.sendall(json.dumps({'name': config.client_name}).encode('utf-8') + b'\n')
+        handshake = json.loads(client.recv(1024).decode())
 
-            client.settimeout(0.2)
+        server_uname = handshake['name']
+        client.sendall(json.dumps({'name': config.client_name}).encode('utf-8') + b'\n')
 
-            print(f' [*] Connect to Server on  {config.target}:{config.port}')
-            send_thread = threading.Thread(target=send_msg)
-            recv_thread = threading.Thread(target=receive_loop)
+        client.settimeout(0.2)
 
-            send_thread.start()
-            recv_thread.start()
+        print(f' [*] Connect to Server on  {config.target}:{config.port}')
+        send_thread = threading.Thread(target=send_msg)
+        recv_thread = threading.Thread(target=receive_loop)
 
-            send_thread.join()
-            recv_thread.join()
-            return
+        send_thread.start()
+        recv_thread.start()
 
-        elif config.run_bind:
+        send_thread.join()
+        recv_thread.join()
+        return
 
-            def shell_receive():
-                while True:
-                    try:
-                        data = client.recv(4096)
+    elif config.run_bind:
 
-                        if not data:
-                            print('\n[*] Server closed the connection.')
-                            break
+        def shell_receive():
+            while True:
+                try:
+                    data = client.recv(4096)
 
-                        sys.stdout.write(data.decode('utf-8', errors='replace'))
-                        sys.stdout.flush()
-
-                    except (ConnectionResetError, BrokenPipeError, OSError):
+                    if not data:
+                        print('\n[*] Server closed the connection.')
                         break
 
-            recv_thread = threading.Thread(
-                target=shell_receive,
-                daemon=True
-            )
-            recv_thread.start()
+                    sys.stdout.write(data.decode('utf-8', errors='replace'))
+                    sys.stdout.flush()
 
+                except (ConnectionResetError, BrokenPipeError, OSError):
+                    break
+
+        recv_thread = threading.Thread(
+            target=shell_receive,
+            daemon=True
+        )
+        recv_thread.start()
+
+        try:
+            while True:
+                command = nf_input().strip()
+
+                if not command:
+                    continue
+
+                if command.lower() in ('quit', 'exit', 'shutdown'):
+                    print('[*] Disconnecting...')
+                    break
+
+                try:
+                    client.sendall((command + '\n').encode('utf-8'))
+                except (ConnectionResetError, BrokenPipeError, OSError):
+                    print('[*] Connection to server was lost.')
+                    break
+
+        except KeyboardInterrupt:
+            print('\n[*] KeyboardInterrupt received.')
+
+        finally:
+            try:
+                client.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+
+            client.close()
+
+    elif config.run_stream:
+        def stream_receive():
             try:
                 while True:
-                    command = nf_input().strip()
+                    data = client.recv(4096)
 
-                    if not command:
-                        continue
-
-                    if command.lower() in ('quit', 'exit', 'shutdown'):
-                        print('[*] Disconnecting...')
+                    if not data:
                         break
 
-                    try:
-                        client.sendall((command + '\n').encode('utf-8'))
-                    except (ConnectionResetError, BrokenPipeError, OSError):
-                        print('[*] Connection to server was lost.')
-                        break
+                    sys.stdout.buffer.write(data)
+                    sys.stdout.buffer.flush()
 
-            except KeyboardInterrupt:
-                print('\n[*] KeyboardInterrupt received.')
+            except (ConnectionResetError, BrokenPipeError, OSError):
+                pass
 
-            finally:
-                try:
-                    client.shutdown(socket.SHUT_RDWR)
-                except OSError:
-                    pass
-
-                client.close()
-
-        elif config.run_stream:
-            def stream_receive():
-                while True:
-                    try:
-                        data = client.recv(4096)
-
-                        if not data:
-                            break
-
-                        sys.stdout.buffer.write(data)
-                        sys.stdout.buffer.flush()
-                    except OSError:
-                        break
-                    
-            def stream_send():
+        def stream_send():
+            try:
                 if buffer:
-                    client.sendall(buffer.encode())
+                    if isinstance(buffer, str):
+                        buffer_data = buffer.encode()
+                    else:
+                        buffer_data = buffer
+
+                    client.sendall(buffer_data)
 
                 while True:
-                    try:
-                        data = sys.stdin.buffer.readline()
+                    data = sys.stdin.buffer.read(4096)
 
-                        if not data:
-                            break
+                    if not data:
+                        break
 
-                        client.sendall(data)
-                    except KeyboardInterrupt:
-                        continue
+                    client.sendall(data)
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                pass
 
-            recv_thread = threading.Thread(target=stream_receive, daemon=True)
-            send_thread = threading.Thread(target=stream_send, daemon=True)
+    recv_thread = threading.Thread(target=stream_receive, daemon=True)
+    send_thread = threading.Thread(target=stream_send, daemon=True)
 
-            recv_thread.start()
-            send_thread.start()
+    recv_thread.start()
+    send_thread.start()
 
-            recv_thread.join()
-            send_thread.join()
-
-    except Exception as e:
-        print(f'[*] Exception! Exiting: Error: {e}')
-    except KeyboardInterrupt as e:
-        print(f'\n [*] KeyboardInterrupt received. Exiting...')
-        client.close()
-
+    try:
+        recv_thread.join()
+        send_thread.join()
+    except KeyboardInterrupt:
+        pass
     finally:
-        stop_event.set()
-        client.close()
-        sys.exit()
+        try:
+            client.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+
+    client.close()
 
 def parse_arguments(config, arguments):
     config.port = 0
